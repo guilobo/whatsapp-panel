@@ -111,6 +111,9 @@ async function migrate() {
     "CREATE TABLE IF NOT EXISTS admins(id bigserial primary key,username text unique not null,password_hash text not null); CREATE TABLE IF NOT EXISTS setup_tokens(token_hash text primary key,expires_at timestamptz not null,used_at timestamptz); CREATE TABLE IF NOT EXISTS sessions(token_hash text primary key,admin_id bigint references admins(id) on delete cascade,csrf text not null,created_at timestamptz default now(),last_seen timestamptz default now(),expires_at timestamptz not null); CREATE TABLE IF NOT EXISTS instances(id text primary key,name text not null,webhook_hash text not null,api_token_enc text,status text default 'unknown',qr_enc text,qr_expires timestamptz,last_event timestamptz,last_connected timestamptz,created_at timestamptz default now()); ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_token_enc text; CREATE TABLE IF NOT EXISTS chats(instance_id text references instances(id) on delete cascade,jid text,name text default '',is_group boolean default false,last_at timestamptz,primary key(instance_id,jid)); ALTER TABLE chats ADD COLUMN IF NOT EXISTS avatar_media_id text; ALTER TABLE chats ADD COLUMN IF NOT EXISTS avatar_checked_at timestamptz; CREATE TABLE IF NOT EXISTS media(id text primary key,file_name text unique not null,mime text not null,original text not null,size bigint not null); CREATE TABLE IF NOT EXISTS messages(id bigserial primary key,instance_id text references instances(id) on delete cascade,chat_jid text,message_id text,sender text default '',sender_name text default '',from_me boolean default false,msg_type text default 'text',content_enc text not null,media_id text references media(id),deleted boolean default false,edited boolean default false,status text default 'received',ts timestamptz default now(),unique(instance_id,chat_jid,message_id)); ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid text; ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_alt text; CREATE TABLE IF NOT EXISTS message_reactions(instance_id text references instances(id) on delete cascade,chat_jid text not null,target_message_id text not null,reactor text not null,reactor_name text default '',emoji text not null,updated_at timestamptz default now(),primary key(instance_id,chat_jid,target_message_id,reactor)); CREATE INDEX IF NOT EXISTS message_reactions_target ON message_reactions(instance_id,chat_jid,target_message_id); CREATE TABLE IF NOT EXISTS message_replies(instance_id text references instances(id) on delete cascade,chat_jid text not null,message_id text not null,target_message_id text not null,reply_preview jsonb not null,created_at timestamptz default now(),primary key(instance_id,chat_jid,message_id)); CREATE INDEX IF NOT EXISTS msg_chat_ts ON messages(instance_id,chat_jid,ts desc); CREATE TABLE IF NOT EXISTS chat_aliases(instance_id text references instances(id) on delete cascade,alias_jid text not null,canonical_jid text not null,primary key(instance_id,alias_jid)); CREATE INDEX IF NOT EXISTS chat_alias_canonical ON chat_aliases(instance_id,canonical_jid); CREATE TABLE IF NOT EXISTS contact_avatars(instance_id text references instances(id) on delete cascade,jid text not null,media_id text,checked_at timestamptz,primary key(instance_id,jid)); CREATE TABLE IF NOT EXISTS versions(id bigserial primary key,message_row bigint references messages(id) on delete cascade,content_enc text not null,media_id text,deleted boolean default false,at timestamptz default now()); CREATE TABLE IF NOT EXISTS events(event_hash text primary key,instance_id text,event_name text,body_enc text,at timestamptz default now()); CREATE TABLE IF NOT EXISTS transfer_tokens(token_hash text primary key,media_id text references media(id) on delete cascade,expires_at timestamptz not null); ALTER TABLE admins DROP COLUMN IF EXISTS totp_enc",
   );
   await pool.query(
+    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_through_id bigint; UPDATE chats c SET read_through_id=coalesce((SELECT max(m.id) FROM messages m WHERE m.instance_id=c.instance_id AND m.chat_jid=c.jid),0) WHERE c.read_through_id IS NULL; ALTER TABLE chats ALTER COLUMN read_through_id SET DEFAULT 0; ALTER TABLE chats ALTER COLUMN read_through_id SET NOT NULL; CREATE INDEX IF NOT EXISTS msg_chat_unread ON messages(instance_id,chat_jid,id) WHERE from_me=false",
+  );
+  await pool.query(
     "CREATE TABLE IF NOT EXISTS telegram_outbox(id bigserial primary key,instance_id text not null,chat_jid text not null,message_id text not null,status text not null default 'pending',attempts integer not null default 0,available_at timestamptz not null default now(),locked_at timestamptz,text_parts_sent integer not null default 0,media_sent boolean not null default false,last_error text,created_at timestamptz not null default now(),unique(instance_id,chat_jid,message_id)); CREATE INDEX IF NOT EXISTS telegram_outbox_pending ON telegram_outbox(status,available_at,created_at)",
   );
   await reconcileExistingChatAliases();
@@ -423,7 +426,7 @@ async function mergeChatJid(db, instanceId, source, target) {
     [instanceId, source, target],
   );
   await db.query(
-    "insert into chats(instance_id,jid,name,is_group,last_at,avatar_media_id,avatar_checked_at) select instance_id,$3,name,is_group,last_at,avatar_media_id,avatar_checked_at from chats where instance_id=$1 and jid=$2 on conflict(instance_id,jid) do update set name=case when chats.name='' or chats.name ~ '^[0-9]+$' then excluded.name else chats.name end,last_at=greatest(chats.last_at,excluded.last_at),avatar_media_id=coalesce(chats.avatar_media_id,excluded.avatar_media_id),avatar_checked_at=coalesce(chats.avatar_checked_at,excluded.avatar_checked_at)",
+    "insert into chats(instance_id,jid,name,is_group,last_at,avatar_media_id,avatar_checked_at,read_through_id) select instance_id,$3,name,is_group,last_at,avatar_media_id,avatar_checked_at,read_through_id from chats where instance_id=$1 and jid=$2 on conflict(instance_id,jid) do update set name=case when chats.name='' or chats.name ~ '^[0-9]+$' then excluded.name else chats.name end,last_at=greatest(chats.last_at,excluded.last_at),avatar_media_id=coalesce(chats.avatar_media_id,excluded.avatar_media_id),avatar_checked_at=coalesce(chats.avatar_checked_at,excluded.avatar_checked_at),read_through_id=greatest(chats.read_through_id,excluded.read_through_id)",
     [instanceId, source, target],
   );
   await db.query("delete from chats where instance_id=$1 and jid=$2", [
@@ -698,7 +701,7 @@ app.get("/api/chats", auth, async (q, r, n) => {
   try {
     if (!q.query.instanceId) return r.json([]);
     const a = await pool.query(
-      "select c.jid,c.name,c.is_group,c.last_at,c.avatar_media_id,m.content_enc,m.media_id,m.msg_type,m.deleted,m.from_me from chats c left join lateral(select content_enc,media_id,msg_type,deleted,from_me from messages where instance_id=c.instance_id and chat_jid=c.jid order by ts desc,id desc limit 1)m on true where c.instance_id=$1 order by c.last_at desc nulls last limit 500",
+      "select c.jid,c.name,c.is_group,c.last_at,c.avatar_media_id,m.content_enc,m.media_id,m.msg_type,m.deleted,m.from_me,(select count(*)::int from messages u where u.instance_id=c.instance_id and u.chat_jid=c.jid and u.from_me=false and u.id>c.read_through_id) unread_count from chats c left join lateral(select content_enc,media_id,msg_type,deleted,from_me from messages where instance_id=c.instance_id and chat_jid=c.jid order by ts desc,id desc limit 1)m on true where c.instance_id=$1 order by c.last_at desc nulls last limit 500",
       [q.query.instanceId],
     );
     r.json(
@@ -708,6 +711,7 @@ app.get("/api/chats", auth, async (q, r, n) => {
         group: x.is_group,
         avatarMediaId: x.avatar_media_id,
         time: x.last_at,
+        unreadCount: x.unread_count,
         preview: x.deleted
           ? "Deleted message"
           : x.content_enc
@@ -717,6 +721,22 @@ app.get("/api/chats", auth, async (q, r, n) => {
         fromMe: x.from_me,
       })),
     );
+  } catch (e) {
+    n(e);
+  }
+});
+app.post("/api/chats/:jid/read", auth, async (q, r, n) => {
+  try {
+    const instanceId = String(q.body.instanceId || ""),
+      jid = q.params.jid;
+    if (!instanceId || !jid) return r.sendStatus(400);
+    const result = await pool.query(
+      "update chats c set read_through_id=greatest(c.read_through_id,coalesce((select max(m.id) from messages m where m.instance_id=c.instance_id and m.chat_jid=c.jid),0)) where c.instance_id=$1 and c.jid=$2 returning c.read_through_id",
+      [instanceId, jid],
+    );
+    if (!result.rowCount) return r.sendStatus(404);
+    emit("chat-read", { instanceId, chatJid: jid });
+    r.json({ ok: true, readThroughId: result.rows[0].read_through_id });
   } catch (e) {
     n(e);
   }

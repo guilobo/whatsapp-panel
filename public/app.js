@@ -21,6 +21,8 @@ const $ = (s) => document.querySelector(s),
     emojiGroup: 0,
     imageViewerTrigger: null,
     sendingText: false,
+    pendingImage: null,
+    sendingImage: false,
   };
 function show(id, on) {
   $(id).classList.toggle("hidden", !on);
@@ -191,6 +193,10 @@ function listen() {
       loadMessages();
     if (d.instanceId === state.instance) loadChats();
   });
+  state.es.addEventListener("chat-read", (e) => {
+    const d = JSON.parse(e.data);
+    if (d.instanceId === state.instance) loadChats();
+  });
   state.es.addEventListener("instance", (e) => {
     const d = JSON.parse(e.data);
     if (d.id === state.instance) setState(d.status);
@@ -317,7 +323,8 @@ function renderChats() {
     name.textContent = c.name;
     const preview = document.createElement("small");
     preview.textContent = c.preview || "No messages";
-    meta.append(name, preview);
+    const metaHead = document.createElement("div");
+    metaHead.className = "chat-meta-head";
     const time = document.createElement("span");
     time.className = "chat-time";
     time.textContent = c.time
@@ -326,7 +333,21 @@ function renderChats() {
           minute: "2-digit",
         })
       : "";
-    row.append(av, meta, time);
+    metaHead.append(name, time);
+    meta.append(metaHead, preview);
+    row.append(av, meta);
+    if (c.unreadCount > 0) {
+      row.classList.add("has-unread");
+      const badge = document.createElement("span"),
+        count = Number(c.unreadCount),
+        label = count + (count === 1 ? " unread message" : " unread messages");
+      badge.className = "unread-badge";
+      badge.textContent = count > 99 ? "99+" : String(count);
+      badge.setAttribute("role", "status");
+      badge.setAttribute("aria-label", label);
+      badge.title = label;
+      row.append(badge);
+    }
     root.append(row);
   });
 }
@@ -593,6 +614,15 @@ function clearReply() {
   if (composer) composer.classList.remove("reply-active");
   show("#reply-composer", false);
 }
+function resizeMessageInput() {
+  const input = $("#message-input");
+  if (!input) return;
+  input.style.height = "auto";
+  const maxHeight = Math.min(168, Math.max(72, window.innerHeight * 0.32)),
+    height = Math.min(input.scrollHeight, maxHeight);
+  input.style.height = height + "px";
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+}
 function startReply(message) {
   if (!message || message.deleted) return;
   closeMessageMenus();
@@ -736,6 +766,7 @@ function insertEmoji(emoji) {
     end = input.selectionEnd ?? start;
   if (input.value.length + emoji.length - (end - start) > 12000) return;
   input.setRangeText(emoji, start, end, "end");
+  resizeMessageInput();
   input.focus();
 }
 async function sendReaction(id, reaction) {
@@ -755,17 +786,40 @@ async function sendReaction(id, reaction) {
 }
 async function loadMessages() {
   if (!state.chat || !state.instance) return;
+  const jid = state.chat,
+    instanceId = state.instance;
   try {
-    state.messages = await api(
+    const messages = await api(
       "/api/chats/" +
-        encodeURIComponent(state.chat) +
+        encodeURIComponent(jid) +
         "/messages?instanceId=" +
-        encodeURIComponent(state.instance),
+        encodeURIComponent(instanceId),
     );
+    if (state.chat !== jid || state.instance !== instanceId) return;
+    state.messages = messages;
     renderMessages();
+    if (chatIsForeground(jid, instanceId)) markChatRead(jid, instanceId);
   } catch (e) {
     toast(e.message);
   }
+}
+function chatIsForeground(jid = state.chat, instanceId = state.instance) {
+  return (
+    !!jid &&
+    jid === state.chat &&
+    instanceId === state.instance &&
+    document.visibilityState === "visible" &&
+    document.hasFocus()
+  );
+}
+async function markChatRead(jid, instanceId) {
+  if (!chatIsForeground(jid, instanceId)) return;
+  try {
+    await api("/api/chats/" + encodeURIComponent(jid) + "/read", {
+      method: "POST",
+      body: JSON.stringify({ instanceId }),
+    });
+  } catch {}
 }
 function renderMessages() {
   closeEmojiPicker();
@@ -1037,7 +1091,10 @@ async function sendText(e) {
         ...(replyTo ? { replyTo: replyTo.id } : {}),
       }),
     });
-    if (input.value === draft) input.value = "";
+    if (input.value === draft) {
+      input.value = "";
+      resizeMessageInput();
+    }
     if (replyTo && state.replyTo?.id === replyTo.id) clearReply();
     toast("Message sent");
   } catch (e) {
@@ -1052,19 +1109,134 @@ async function sendText(e) {
 async function sendFile(e) {
   const file = e.target.files[0];
   if (!file || !state.chat) return;
+  if (file.type.startsWith("image/")) {
+    queueImagePreview(file);
+    e.target.value = "";
+    return;
+  }
+  if (await sendMediaFile(file)) toast("File sent");
+  e.target.value = "";
+}
+async function sendMediaFile(file, options = {}) {
   const f = new FormData();
-  f.append("instanceId", state.instance);
-  f.append("jid", state.chat);
+  const instanceId = options.instanceId || state.instance,
+    jid = options.jid || state.chat,
+    replyTo = options.replyTo === undefined ? state.replyTo?.id : options.replyTo;
+  f.append("instanceId", instanceId);
+  f.append("jid", jid);
   f.append("file", file);
-  if (state.replyTo) f.append("replyTo", state.replyTo.id);
+  if (options.caption) f.append("caption", options.caption);
+  if (replyTo) f.append("replyTo", replyTo);
   try {
     await api("/api/send/media", { method: "POST", body: f });
-    clearReply();
-    toast("File sent");
+    if (state.instance === instanceId && state.chat === jid) clearReply();
+    return true;
   } catch (err) {
     toast(err.message);
+    return false;
   }
-  e.target.value = "";
+}
+function queueImagePreview(file) {
+  if (!state.chat || !state.instance || !file?.type?.startsWith("image/")) return;
+  if (state.sendingImage) {
+    toast("Wait for the current image to finish sending.");
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    toast("Images must be 20 MB or smaller.");
+    return;
+  }
+  closeImagePreview();
+  const url = URL.createObjectURL(file);
+  state.pendingImage = {
+    file,
+    url,
+    instanceId: state.instance,
+    jid: state.chat,
+    replyTo: state.replyTo?.id || "",
+  };
+  $("#image-send-preview").src = url;
+  $("#image-send-preview").alt = file.name || "Image to send";
+  $("#image-caption").value = "";
+  $("#image-send-error").textContent = "";
+  show("#image-send-modal", true);
+  $("#image-caption").focus();
+}
+function closeImagePreview() {
+  if (state.pendingImage?.url) URL.revokeObjectURL(state.pendingImage.url);
+  state.pendingImage = null;
+  state.sendingImage = false;
+  $("#image-send-preview")?.removeAttribute("src");
+  $("#image-caption").value = "";
+  $("#image-send-error").textContent = "";
+  $("#image-send-confirm").disabled = false;
+  $("#image-send-confirm").textContent = "Send";
+  $("#image-send-cancel").disabled = false;
+  $("#image-send-close").disabled = false;
+  $("#image-caption").disabled = false;
+  $("#image-send-modal").removeAttribute("aria-busy");
+  show("#image-send-modal", false);
+}
+async function sendPendingImage() {
+  const pending = state.pendingImage;
+  if (!pending || state.sendingImage) return;
+  state.sendingImage = true;
+  const button = $("#image-send-confirm");
+  button.disabled = true;
+  button.textContent = "Sending…";
+  $("#image-send-cancel").disabled = true;
+  $("#image-send-close").disabled = true;
+  $("#image-caption").disabled = true;
+  $("#image-send-modal").setAttribute("aria-busy", "true");
+  $("#image-send-error").textContent = "";
+  const result = await sendMediaFile(pending.file, {
+    instanceId: pending.instanceId,
+    jid: pending.jid,
+    replyTo: pending.replyTo,
+    caption: $("#image-caption").value,
+  });
+  if (result) {
+    if (state.pendingImage === pending) closeImagePreview();
+    toast("Image sent");
+  } else {
+    state.sendingImage = false;
+    button.disabled = false;
+    button.textContent = "Send";
+    $("#image-send-cancel").disabled = false;
+    $("#image-send-close").disabled = false;
+    $("#image-caption").disabled = false;
+    $("#image-send-modal").removeAttribute("aria-busy");
+    $("#image-send-error").textContent =
+      "The image could not be sent. Check the connection and try again.";
+  }
+}
+function imageFromClipboard(event) {
+  if (!state.chat || !event.clipboardData) return;
+  const items = Array.from(event.clipboardData.items || []),
+    image = items.find(
+      (item) => item.kind === "file" && item.type.startsWith("image/"),
+    );
+  if (!image) return;
+  const file = image.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  queueImagePreview(file);
+}
+function imageFromDrop(event) {
+  $(".conversation").classList.remove("drag-over");
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  event.preventDefault();
+  if (!state.chat) {
+    toast("Open a chat before dropping an image.");
+    return;
+  }
+  const file = files.find((item) => item.type.startsWith("image/"));
+  if (!file) {
+    toast("Only images can be dropped into the chat.");
+    return;
+  }
+  queueImagePreview(file);
 }
 function showQr(data) {
   if (!data) return;
@@ -1259,7 +1431,41 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#complete-form").addEventListener("submit", finishSetup);
   $("#instance-form").addEventListener("submit", newInstance);
   $("#composer").addEventListener("submit", sendText);
+  $("#message-input").addEventListener("input", resizeMessageInput);
+  window.addEventListener("resize", resizeMessageInput);
+  $("#message-input").addEventListener("keydown", (event) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.isComposing ||
+      event.keyCode === 229
+    )
+      return;
+    event.preventDefault();
+    $("#composer").requestSubmit();
+  });
   $("#file-input").addEventListener("change", sendFile);
+  $("#image-send-confirm").addEventListener("click", sendPendingImage);
+  $("#image-send-cancel").addEventListener("click", closeImagePreview);
+  $("#image-send-close").addEventListener("click", closeImagePreview);
+  const conversation = $(".conversation");
+  conversation.addEventListener("paste", imageFromClipboard);
+  conversation.addEventListener("dragenter", (event) => {
+    if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+    event.preventDefault();
+    if (state.chat) conversation.classList.add("drag-over");
+  });
+  conversation.addEventListener("dragover", (event) => {
+    if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (state.chat) conversation.classList.add("drag-over");
+  });
+  conversation.addEventListener("dragleave", (event) => {
+    if (!conversation.contains(event.relatedTarget))
+      conversation.classList.remove("drag-over");
+  });
+  conversation.addEventListener("drop", imageFromDrop);
   $("#search").addEventListener("input", renderChats);
   $("#instance-select").addEventListener("change", async (e) => {
     state.instance = e.target.value;
@@ -1337,6 +1543,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if ($("#image-viewer").open) closeImageViewer();
+    else if (!$("#image-send-modal").classList.contains("hidden")) {
+      if (!state.sendingImage) closeImagePreview();
+      return;
+    }
     else if (!$("#emoji-picker").classList.contains("hidden"))
       closeEmojiPicker();
     else if (document.querySelector(".message-context-menu:not(.hidden)"))
@@ -1346,6 +1556,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     else if (state.replyTo) clearReply();
   });
   $("#refresh").addEventListener("click", loadChats);
+  const refreshReadChat = () => {
+    if (state.chat && chatIsForeground()) loadMessages();
+  };
+  window.addEventListener("focus", refreshReadChat);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshReadChat();
+  });
   $("#connect-btn").addEventListener("click", reconnect);
   $("#forward-form").addEventListener("submit", forward);
   $("#logout").addEventListener("click", async () => {

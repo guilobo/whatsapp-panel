@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="theme-color" content="#075e54" />
     <title>WhatsApp Panel</title>
-    <link rel="stylesheet" href="/style.css?v=20261118-visual-theme" />
+    <link rel="stylesheet" href="/style.css?v=20261118-compose-unread" />
   </head>
   <body>
     <div id="login" class="auth-wrap hidden">
@@ -198,12 +198,13 @@
                 title="Choose emoji"
               >
                 ☺</button
-              ><input
+              ><textarea
                 id="message-input"
                 placeholder="Type a message"
-                autocomplete="off"
+                aria-label="Type a message"
+                rows="1"
                 maxlength="12000"
-              /><button
+              ></textarea><button
                 id="send-message"
                 class="send"
                 type="submit"
@@ -322,6 +323,36 @@
         <p id="new-chat-error" class="error"></p>
       </section>
     </div>
+    <div id="image-send-modal" class="modal hidden">
+      <section
+        class="modal-card image-send-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="image-send-title"
+      >
+        <button
+          id="image-send-close"
+          class="close"
+          type="button"
+          aria-label="Cancel image"
+        >
+          ×
+        </button>
+        <h2 id="image-send-title">Send image</h2>
+        <div class="image-send-preview-wrap">
+          <img id="image-send-preview" class="image-send-preview" alt="Image to send" />
+        </div>
+        <label class="image-caption-label">
+          Caption (optional)
+          <textarea id="image-caption" maxlength="12000" rows="2"></textarea>
+        </label>
+        <p id="image-send-error" class="error" role="alert"></p>
+        <div class="image-send-actions">
+          <button id="image-send-cancel" class="secondary" type="button">Cancel</button>
+          <button id="image-send-confirm" class="primary" type="button">Send</button>
+        </div>
+      </section>
+    </div>
     <dialog id="image-viewer" class="image-viewer" aria-label="Image preview">
       <div class="image-viewer-toolbar">
         <a
@@ -349,6 +380,6 @@
       <img id="image-viewer-image" alt="" />
     </dialog>
     <div id="toast" role="status" class="toast"></div>
-    <script src="/app.js?v=20261118-send-guard" defer></script>
+    <script src="/app.js?v=20261118-compose-unread" defer></script>
   </body>
 </html>
