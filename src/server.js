@@ -116,7 +116,7 @@ async function migrate() {
   await pool.query(
     "CREATE TABLE IF NOT EXISTS telegram_outbox(id bigserial primary key,instance_id text not null,chat_jid text not null,message_id text not null,status text not null default 'pending',attempts integer not null default 0,available_at timestamptz not null default now(),locked_at timestamptz,text_parts_sent integer not null default 0,media_sent boolean not null default false,last_error text,created_at timestamptz not null default now(),unique(instance_id,chat_jid,message_id)); CREATE INDEX IF NOT EXISTS telegram_outbox_pending ON telegram_outbox(status,available_at,created_at)",
   );
-  await reconcileExistingChatAliases();
+  await backfillExistingMessageSenderMetadata();
 }
 function emit(type, data) {
   const s = "event: " + type + "\ndata: " + JSON.stringify(data) + "\n\n";
@@ -415,12 +415,53 @@ async function evoInstance(id, p, o = {}) {
   return evo(p, { ...o, instanceToken: open(row.api_token_enc).toString() });
 }
 const isDirectJid = (jid) => /@(s\.whatsapp\.net|c\.us|lid)$/i.test(jid);
+const isPhoneJid = (jid) => /@(s\.whatsapp\.net|c\.us)$/i.test(jid);
+function directJidPair(values) {
+  const pair = [...new Set(values.map((x) => String(x || "")).filter(isDirectJid))];
+  if (pair.length !== 2) return null;
+  const phone = pair.find(isPhoneJid),
+    lid = pair.find((jid) => /@lid$/i.test(jid));
+  return phone && lid ? { phone, lid } : null;
+}
+async function resolveDirectChatJid(db, instanceId, jid) {
+  if (!isDirectJid(jid)) return jid;
+  const row = (
+    await db.query(
+      "select a.canonical_jid,(select count(distinct other.alias_jid) from chat_aliases other where other.instance_id=a.instance_id and other.canonical_jid=a.canonical_jid and other.alias_jid ~ '@(s\\.whatsapp\\.net|c\\.us)$') phone_aliases from chat_aliases a where a.instance_id=$1 and a.alias_jid=$2",
+      [instanceId, jid],
+    )
+  ).rows[0];
+  if (Number(row?.phone_aliases || 0) > 1) return jid;
+  return row?.canonical_jid || jid;
+}
 async function mergeChatJid(db, instanceId, source, target) {
   if (!source || !target || source === target) return;
+  await db.query(
+    "update versions v set message_row=current.id from messages old join messages current on current.instance_id=old.instance_id and current.chat_jid=$3 and current.message_id=old.message_id where old.instance_id=$1 and old.chat_jid=$2 and v.message_row=old.id",
+    [instanceId, source, target],
+  );
   await db.query(
     "delete from messages old using messages current where old.instance_id=$1 and old.chat_jid=$2 and current.instance_id=$1 and current.chat_jid=$3 and old.message_id=current.message_id",
     [instanceId, source, target],
   );
+  for (const [table, key] of [
+    ["message_replies", "message_id"],
+    ["message_reactions", "target_message_id"],
+    ["telegram_outbox", "message_id"],
+  ]) {
+    const conflict =
+      table === "message_reactions"
+        ? "old.target_message_id=current.target_message_id and old.reactor=current.reactor"
+        : `old.${key}=current.${key}`;
+    await db.query(
+      `delete from ${table} old using ${table} current where old.instance_id=$1 and old.chat_jid=$2 and current.instance_id=$1 and current.chat_jid=$3 and ${conflict}`,
+      [instanceId, source, target],
+    );
+    await db.query(
+      `update ${table} set chat_jid=$3 where instance_id=$1 and chat_jid=$2`,
+      [instanceId, source, target],
+    );
+  }
   await db.query(
     "update messages set chat_jid=$3 where instance_id=$1 and chat_jid=$2",
     [instanceId, source, target],
@@ -433,52 +474,53 @@ async function mergeChatJid(db, instanceId, source, target) {
     instanceId,
     source,
   ]);
-  await db.query(
-    "update chat_aliases set canonical_jid=$3 where instance_id=$1 and canonical_jid=$2",
-    [instanceId, source, target],
-  );
 }
 async function linkDirectChatJids(db, instanceId, values, preferred = "") {
-  const aliases = [
-    ...new Set(values.map((x) => String(x || "")).filter(isDirectJid)),
-  ];
-  if (!aliases.length) return preferred || "";
-  const phoneJid = aliases.find((x) => /@(s\.whatsapp\.net|c\.us)$/i.test(x));
-  const known = (
-    await db.query(
-      "select canonical_jid from chat_aliases where instance_id=$1 and alias_jid=any($2::text[]) limit 1",
-      [instanceId, aliases],
-    )
-  ).rows[0]?.canonical_jid;
-  const canonical =
-    phoneJid ||
-    known ||
-    (isDirectJid(preferred) ? preferred : "") ||
-    aliases[0];
-  for (const alias of [...aliases, canonical]) {
-    const old = (
+  const pair = directJidPair(values);
+  if (!pair) return resolveDirectChatJid(db, instanceId, preferred || values[0] || "");
+  const { phone, lid } = pair;
+  await db.query("select pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+    instanceId,
+    "direct-chat-aliases",
+  ]);
+  const aliases = [phone, lid],
+    mappings = (
       await db.query(
-        "select canonical_jid from chat_aliases where instance_id=$1 and alias_jid=$2",
-        [instanceId, alias],
+        "select alias_jid,canonical_jid from chat_aliases where instance_id=$1 and alias_jid=any($2::text[])",
+        [instanceId, aliases],
       )
-    ).rows[0]?.canonical_jid;
-    if (old && old !== canonical)
-      await mergeChatJid(db, instanceId, old, canonical);
-    if (alias !== canonical)
-      await mergeChatJid(db, instanceId, alias, canonical);
+    ).rows,
+    attachedAliases = (
+      await db.query(
+        "select alias_jid from chat_aliases where instance_id=$1 and canonical_jid=$2 and alias_jid<>all($3::text[]) limit 1",
+        [instanceId, lid, aliases],
+      )
+    ).rows;
+  if (
+    attachedAliases.length ||
+    mappings.some(
+      (row) =>
+        row.canonical_jid !== phone &&
+        row.canonical_jid !== lid &&
+        row.canonical_jid !== row.alias_jid,
+    )
+  )
+    return phone;
+  // A pair is linked only when the phone JID and LID are explicitly reported
+  // as the same direct contact. Sender JIDs are never inferred to be Chat JIDs.
+  await mergeChatJid(db, instanceId, lid, phone);
+  for (const alias of aliases)
     await db.query(
-      "insert into chat_aliases(instance_id,alias_jid,canonical_jid) values($1,$2,$3) on conflict(instance_id,alias_jid) do update set canonical_jid=excluded.canonical_jid",
-      [instanceId, alias, canonical],
+      "insert into chat_aliases(instance_id,alias_jid,canonical_jid) values($1,$2,$3) on conflict(instance_id,alias_jid) do update set canonical_jid=excluded.canonical_jid where chat_aliases.canonical_jid in ($3,$4) or chat_aliases.canonical_jid=chat_aliases.alias_jid",
+      [instanceId, alias, phone, lid],
     );
-  }
-  return canonical;
+  return phone;
 }
-async function reconcileExistingChatAliases() {
+async function backfillExistingMessageSenderMetadata() {
   const rows = await pool.query(
     "select instance_id,event_name,body_enc from events where lower(event_name) in ('message','sendmessage') and at>now()-interval '90 days' order by at desc limit 5000",
   );
-  const pairs = new Map(),
-    messageUpdates = [];
+  const messageUpdates = [];
   for (const row of rows.rows) {
     try {
       const payload = JSON.parse(open(row.body_enc).toString()),
@@ -487,12 +529,7 @@ async function reconcileExistingChatAliases() {
         chat = String(info.Chat || info.chat || ""),
         messageId = String(info.ID || info.id || data.ID || ""),
         sender = String(info.Sender || info.sender || ""),
-        senderAlt = String(info.SenderAlt || info.senderAlt || ""),
-        group = /@g\.us$/i.test(chat) || info.IsGroup === true,
-        fromMe =
-          info.IsFromMe === true ||
-          info.FromMe === true ||
-          String(info.IsFromMe || info.FromMe || "").toLowerCase() === "true";
+        senderAlt = String(info.SenderAlt || info.senderAlt || "");
       if (chat && messageId && sender)
         messageUpdates.push([
           row.instance_id,
@@ -501,23 +538,6 @@ async function reconcileExistingChatAliases() {
           sender,
           senderAlt,
         ]);
-      if (group || fromMe) continue;
-      const values = [
-          chat,
-          info.Sender,
-          info.SenderAlt,
-          info.sender,
-          info.senderAlt,
-        ]
-          .map((x) => String(x || ""))
-          .filter(isDirectJid),
-        pn = values.find((x) => /@(s\.whatsapp\.net|c\.us)$/i.test(x)),
-        lid = values.find((x) => /@lid$/i.test(x));
-      if (pn && lid) {
-        const key = row.instance_id + "\n" + pn;
-        if (!pairs.has(key))
-          pairs.set(key, { instanceId: row.instance_id, pn, lid });
-      }
     } catch {}
   }
   if (messageUpdates.length) {
@@ -531,26 +551,6 @@ async function reconcileExistingChatAliases() {
         [[], [], [], [], []],
       ),
     );
-  }
-  if (pairs.size) {
-    const db = await pool.connect();
-    try {
-      await db.query("begin");
-      for (const pair of pairs.values()) {
-        await linkDirectChatJids(
-          db,
-          pair.instanceId,
-          [pair.pn, pair.lid],
-          pair.pn,
-        );
-      }
-      await db.query("commit");
-    } catch (error) {
-      await db.query("rollback").catch(() => {});
-      throw error;
-    } finally {
-      db.release();
-    }
   }
 }
 app.get("/api/instances", auth, async (q, r, n) => {
@@ -1881,6 +1881,7 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
         String(i.IsFromMe || i.fromMe || "").toLowerCase() === "true",
       senderJid = String(i.Sender || i.sender || ""),
       senderAlt = String(i.SenderAlt || i.senderAlt || ""),
+      chatAlt = String(i.ChatAlt || i.chatAlt || ""),
       groupInfo =
         d.groupData || d.GroupData || d.groupInfo || d.GroupInfo || {},
       groupName = String(
@@ -1915,10 +1916,19 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
       return r.sendStatus(200);
     }
     if (chat && !isGroup) {
-      const aliases = fromMe
-        ? [chat, i.ChatAlt, i.chatAlt]
-        : [chat, senderJid, senderAlt, i.ChatAlt, i.chatAlt];
-      chat = await linkDirectChatJids(c, q.params.id, aliases, chat);
+      const provenPair =
+        directJidPair([chat, chatAlt]) ||
+        (!fromMe && senderJid === chat
+          ? directJidPair([chat, senderAlt])
+          : null);
+      chat = provenPair
+        ? await linkDirectChatJids(
+            c,
+            q.params.id,
+            [provenPair.phone, provenPair.lid],
+            chat,
+          )
+        : await resolveDirectChatJid(c, q.params.id, chat);
     }
     await c.query("update instances set last_event=now() where id=$1", [
       q.params.id,
@@ -1993,10 +2003,9 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
           : senderJid || senderAlt || (!groupReaction ? reactionChat : ""),
         emoji = String(reactionMessage.text || reactionMessage.Text || "");
       if (reactionChat && !groupReaction)
-        reactionChat = await linkDirectChatJids(
+        reactionChat = await resolveDirectChatJid(
           c,
           q.params.id,
-          [reactionChat, chat, senderJid, senderAlt],
           reactionChat,
         );
       if (reactionChat && targetId && reactor) {
