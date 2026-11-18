@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#075e54" />
+    <title>WhatsApp Panel</title>
+    <link rel="stylesheet" href="/style.css?v=20261118-visual-theme" />
+  </head>
+  <body>
+    <div id="login" class="auth-wrap hidden">
+      <section class="auth-card">
+        <div class="brand">
+          <span class="brand-icon">◉</span>
+          <div><b>WhatsApp Panel</b><small>Your messaging space</small></div>
+        </div>
+        <h1>Sign in</h1>
+        <p class="muted">Enter your username and password.</p>
+        <form id="login-form">
+          <label
+            >Username<input
+              name="username"
+              autocomplete="username"
+              required /></label
+          ><label
+            >Password<input
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required /></label
+          ><button class="primary full">Sign in</button>
+        </form>
+        <p id="login-error" class="error"></p>
+      </section>
+    </div>
+    <div id="setup" class="auth-wrap hidden">
+      <section class="auth-card">
+        <div class="brand">
+          <span class="brand-icon">◉</span>
+          <div>
+            <b>Initial setup</b
+            ><small>Create the single administrator account</small>
+          </div>
+        </div>
+        <div id="setup-token-form">
+          <h1>Activate the panel</h1>
+          <p class="muted">
+            Enter the one-time setup code provided by the server administrator.
+          </p>
+          <form id="token-form">
+            <label
+              >Setup code<input
+                name="token"
+                autocomplete="off"
+                required /></label
+            ><button class="primary full">Continue</button>
+          </form>
+          <p id="token-error" class="error"></p>
+        </div>
+        <div id="setup-password" class="hidden">
+          <h1>Create the administrator account</h1>
+          <p class="muted">
+            Choose a username and a strong password to access the panel.
+          </p>
+          <form id="complete-form">
+            <label
+              >Username<input
+                name="username"
+                minlength="3"
+                maxlength="32"
+                required /></label
+            ><label
+              >Password (at least 14 characters)<input
+                name="password"
+                type="password"
+                minlength="14"
+                autocomplete="new-password"
+                required /></label
+            ><button class="primary full">Finish setup</button>
+          </form>
+          <p id="complete-error" class="error"></p>
+        </div>
+      </section>
+    </div>
+    <div id="app" class="shell hidden">
+      <header class="topbar">
+        <div class="brand compact">
+          <span class="brand-icon">◉</span><b>WhatsApp</b
+          ><span class="panel-tag">PANEL</span>
+        </div>
+        <div class="toolbar">
+          <button
+            id="theme-toggle"
+            class="icon-btn theme-toggle"
+            type="button"
+            aria-label="Switch to dark mode"
+            title="Switch to dark mode"
+          >
+            ☾
+          </button>
+          <select id="instance-select" aria-label="Instance"></select
+          ><span id="connection-state" class="state"
+            ><i></i><span>Disconnected</span></span
+          ><button
+            id="new-instance"
+            class="icon-btn"
+            title="New instance"
+            aria-label="New instance"
+          >
+            ＋</button
+          ><button id="logout" class="avatar" title="Sign out">G</button>
+        </div>
+      </header>
+      <main class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <h2>Chats</h2>
+            <div class="sidebar-actions">
+              <button
+                class="icon-btn"
+                id="new-chat"
+                title="New chat"
+                aria-label="New chat"
+              >
+                ＋
+              </button>
+              <button
+                class="icon-btn"
+                id="refresh"
+                title="Refresh"
+                aria-label="Refresh"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
+          <div class="search">
+            <span>⌕</span
+            ><input
+              id="search"
+              placeholder="Search chats"
+              aria-label="Search chats"
+            />
+          </div>
+          <div id="chat-list" class="chat-list"></div>
+          <div id="empty-chats" class="empty muted">
+            Select a connected instance to load chats.
+          </div>
+        </aside>
+        <section class="conversation">
+          <div id="chat-placeholder" class="welcome">
+            <div class="welcome-logo">◉</div>
+            <h2>WhatsApp Panel</h2>
+            <p>Select a chat to get started.</p>
+            <small>Messages sync through Evolution Go</small>
+          </div>
+          <div id="chat-view" class="chat-view hidden">
+            <div class="chat-header">
+              <div class="contact-avatar" id="contact-avatar">?</div>
+              <button
+                id="contact-info-btn"
+                class="contact-info-button"
+                type="button"
+                aria-label="Open contact information"
+              >
+                <strong id="contact-name"></strong
+                ><small id="contact-subtitle">Chat</small>
+              </button>
+              <button id="connect-btn" class="secondary hidden">
+                Reconnect
+              </button>
+            </div>
+            <div id="messages" class="messages"></div>
+            <form id="composer" class="composer">
+              <div id="reply-composer" class="reply-composer hidden">
+                <div class="reply-composer-copy">
+                  <strong id="reply-composer-sender"></strong>
+                  <small id="reply-composer-text"></small>
+                </div>
+                <button
+                  id="reply-cancel"
+                  type="button"
+                  aria-label="Cancel reply"
+                >
+                  ×
+                </button>
+              </div>
+              <label class="attach" title="Attach file"
+                >＋<input
+                  type="file"
+                  id="file-input"
+                  accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" /></label
+              ><button
+                id="emoji-button"
+                class="emoji-button"
+                type="button"
+                aria-label="Choose emoji"
+                title="Choose emoji"
+              >
+                ☺</button
+              ><input
+                id="message-input"
+                placeholder="Type a message"
+                autocomplete="off"
+                maxlength="12000"
+              /><button
+                id="send-message"
+                class="send"
+                type="submit"
+                aria-label="Send"
+              >
+                ➤
+              </button>
+              <div
+                id="emoji-picker"
+                class="emoji-picker hidden"
+                role="dialog"
+                aria-label="Choose emoji"
+              >
+                <label class="emoji-search-label">
+                  <span class="visually-hidden">Search emoji</span>
+                  <input
+                    id="emoji-search"
+                    type="search"
+                    placeholder="Search emoji"
+                    autocomplete="off"
+                  />
+                </label>
+                <nav
+                  id="emoji-categories"
+                  class="emoji-categories"
+                  aria-label="Emoji categories"
+                ></nav>
+                <div
+                  id="emoji-grid"
+                  class="emoji-grid"
+                  role="listbox"
+                  aria-label="Emoji results"
+                ></div>
+              </div>
+            </form>
+          </div>
+          <div id="contact-backdrop" class="drawer-backdrop hidden"></div>
+          <aside
+            id="contact-drawer"
+            class="contact-drawer hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Contact information"
+          >
+            <header class="drawer-header">
+              <h2>Contact info</h2>
+              <button
+                id="contact-drawer-close"
+                class="close"
+                type="button"
+                aria-label="Close contact information"
+              >
+                ×
+              </button>
+            </header>
+            <div id="drawer-avatar" class="contact-avatar drawer-avatar">?</div>
+            <h3 id="drawer-name"></h3>
+            <p id="drawer-subtitle" class="muted"></p>
+            <div id="drawer-details" class="drawer-details"></div>
+            <p id="drawer-error" class="error"></p>
+          </aside>
+        </section>
+      </main>
+    </div>
+    <div id="instance-modal" class="modal hidden">
+      <section class="modal-card">
+        <button class="close" data-close="instance-modal">×</button>
+        <h2>New instance</h2>
+        <p class="muted">Choose a name to identify this WhatsApp account.</p>
+        <form id="instance-form">
+          <label>Name<input name="name" maxlength="80" required /></label
+          ><button class="primary full">Create and connect</button>
+        </form>
+        <p id="instance-error" class="error"></p>
+      </section>
+    </div>
+    <div id="qr-modal" class="modal hidden">
+      <section class="modal-card center">
+        <button class="close" data-close="qr-modal">×</button>
+        <h2>Connect your WhatsApp</h2>
+        <p class="muted">
+          On your phone: WhatsApp → Linked devices → Link a device.
+        </p>
+        <img id="qr-image" class="qr" alt="WhatsApp QR code" />
+        <p id="qr-state" class="muted">Waiting for QR code…</p>
+      </section>
+    </div>
+    <div id="forward-modal" class="modal hidden">
+      <section class="modal-card">
+        <button class="close" data-close="forward-modal">×</button>
+        <h2>Forward message</h2>
+        <form id="forward-form">
+          <label>Destination chat<select name="to" required></select></label
+          ><button class="primary full">Forward</button>
+        </form>
+        <p id="forward-error" class="error"></p>
+      </section>
+    </div>
+    <div id="new-chat-modal" class="modal hidden">
+      <section class="modal-card">
+        <button class="close" data-close="new-chat-modal">×</button>
+        <h2>Start a new chat</h2>
+        <p class="muted">Enter a phone number with its country code.</p>
+        <form id="new-chat-form">
+          <label
+            >Phone number<input
+              name="phone"
+              type="tel"
+              inputmode="numeric"
+              autocomplete="tel"
+              placeholder="55 (11) 99999-9999"
+              maxlength="24"
+              required /></label
+          ><button class="primary full">Open chat</button>
+        </form>
+        <p id="new-chat-error" class="error"></p>
+      </section>
+    </div>
+    <dialog id="image-viewer" class="image-viewer" aria-label="Image preview">
+      <div class="image-viewer-toolbar">
+        <a
+          id="image-download"
+          class="image-viewer-action"
+          href="#"
+          download
+          aria-label="Download image"
+          title="Download image"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v4h14v-4" />
+          </svg>
+        </a>
+        <button
+          id="image-viewer-close"
+          class="image-viewer-action"
+          type="button"
+          aria-label="Close image preview"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+      <img id="image-viewer-image" alt="" />
+    </dialog>
+    <div id="toast" role="status" class="toast"></div>
+    <script src="/app.js?v=20261118-send-guard" defer></script>
+  </body>
+</html>

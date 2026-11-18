@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private WhatsApp operations panel backed by Evolution Go",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "bootstrap:token": "node src/bootstrap.js",
+    "check": "node --check src/server.js && node --check src/bootstrap.js && node --check src/telegram.js && node --check public/app.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "prettier": "^3.10.1"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.runtime.env
+*.tar
+*.log
+data/
+.DS_Store
