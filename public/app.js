@@ -739,12 +739,21 @@ function startReply(message) {
   show("#reply-composer", true);
   $("#message-input").focus();
 }
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+function canEditMessage(message) {
+  const sentAt = new Date(message?.time).getTime();
+  return (
+    Boolean(message?.fromMe) &&
+    !message.deleted &&
+    !message.mediaId &&
+    Boolean(String(message.content?.text || "").trim()) &&
+    Number.isFinite(sentAt) &&
+    Date.now() - sentAt < MESSAGE_EDIT_WINDOW_MS
+  );
+}
 function startEdit(message) {
   if (
-    !message?.fromMe ||
-    message.deleted ||
-    message.mediaId ||
-    !String(message.content?.text || "").trim()
+    !canEditMessage(message)
   )
     return;
   closeMessageMenus();
@@ -1173,7 +1182,7 @@ function renderMessages() {
       react.addEventListener("click", () => showReactionPicker(m, b));
       menu.append(quick, reply, react);
       if (m.fromMe) {
-        if (!m.mediaId && String(m.content?.text || "").trim()) {
+        if (canEditMessage(m)) {
           const edit = document.createElement("button");
           edit.type = "button";
           edit.setAttribute("role", "menuitem");

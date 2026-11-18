@@ -41,6 +41,7 @@ const C = {
   enc: Buffer.from(process.env.APP_ENCRYPTION_KEY || "", "hex"),
   media: process.env.MEDIA_DIR || "/app/data/media",
 };
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
 if (!C.db || !C.key || C.enc.length !== 32) {
   console.error("Missing database/API/encryption configuration");
   process.exit(1);
@@ -1763,7 +1764,7 @@ app.post("/api/messages/:id/edit", auth, async (q, r, n) => {
     transaction = true;
     const message = (
       await c.query(
-        "select id,instance_id,chat_jid,message_id,from_me,msg_type,media_id,deleted,content_enc from messages where id=$1 for update",
+        "select id,instance_id,chat_jid,message_id,from_me,msg_type,media_id,deleted,content_enc,ts from messages where id=$1 for update",
         [String(q.params.id)],
       )
     ).rows[0];
@@ -1778,6 +1779,17 @@ app.post("/api/messages/:id/edit", auth, async (q, r, n) => {
       return r
         .status(404)
         .json({ error: "This sent message can no longer be edited." });
+    }
+    const sentAt = new Date(message.ts).getTime();
+    if (
+      !Number.isFinite(sentAt) ||
+      Date.now() - sentAt >= MESSAGE_EDIT_WINDOW_MS
+    ) {
+      await c.query("rollback");
+      transaction = false;
+      return r.status(422).json({
+        error: "WhatsApp only allows message edits within 15 minutes after sending.",
+      });
     }
     const current = JSON.parse(open(message.content_enc).toString());
     if (message.media_id || !String(current.text || "").trim()) {
