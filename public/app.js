@@ -23,9 +23,42 @@ const $ = (s) => document.querySelector(s),
     sendingText: false,
     pendingImage: null,
     sendingImage: false,
+    titleTimer: 0,
+    titleUnreadCount: 0,
+    titleShowingMessage: false,
   };
+const BASE_PAGE_TITLE = document.title || "WhatsApp Panel";
 function show(id, on) {
   $(id).classList.toggle("hidden", !on);
+}
+function setUnreadTitle(count) {
+  count = Math.max(0, Math.floor(Number(count) || 0));
+  if (!state.user || !state.instance || !count) {
+    if (state.titleTimer) clearInterval(state.titleTimer);
+    state.titleTimer = 0;
+    state.titleUnreadCount = 0;
+    state.titleShowingMessage = false;
+    document.title = BASE_PAGE_TITLE;
+    return;
+  }
+  if (count === state.titleUnreadCount && state.titleTimer) return;
+  if (state.titleTimer) clearInterval(state.titleTimer);
+  state.titleUnreadCount = count;
+  state.titleShowingMessage = false;
+  document.title = `(${count}) ${BASE_PAGE_TITLE}`;
+  state.titleTimer = window.setInterval(() => {
+    state.titleShowingMessage = !state.titleShowingMessage;
+    document.title = state.titleShowingMessage
+      ? "New message"
+      : `(${state.titleUnreadCount}) ${BASE_PAGE_TITLE}`;
+  }, 1500);
+}
+function updateUnreadTitle() {
+  const total = state.chats.reduce(
+    (sum, chat) => sum + Math.max(0, Number(chat.unreadCount) || 0),
+    0,
+  );
+  setUnreadTitle(total);
 }
 const THEME_STORAGE_KEY = "whatsapp-panel-theme";
 function initialTheme() {
@@ -98,6 +131,7 @@ async function api(url, opts) {
   return data;
 }
 function loginScreen() {
+  setUnreadTitle(0);
   show("#login", true);
   show("#setup", false);
   show("#app", false);
@@ -260,6 +294,9 @@ async function refreshInstances() {
     });
     if (!rows.length) {
       state.instance = "";
+      state.chat = "";
+      state.chats = [];
+      updateUnreadTitle();
       $("#empty-chats").textContent = "Add an instance to get started.";
       $("#chat-list").replaceChildren();
       return;
@@ -280,12 +317,19 @@ async function refreshInstances() {
   }
 }
 async function loadChats() {
-  if (!state.instance) return;
+  if (!state.instance) {
+    updateUnreadTitle();
+    return;
+  }
+  const instanceId = state.instance;
   try {
-    state.chats = await api(
-      "/api/chats?instanceId=" + encodeURIComponent(state.instance),
+    const chats = await api(
+      "/api/chats?instanceId=" + encodeURIComponent(instanceId),
     );
+    if (state.instance !== instanceId) return;
+    state.chats = chats;
     renderChats();
+    updateUnreadTitle();
   } catch (e) {
     toast(e.message);
   }
@@ -1470,6 +1514,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#instance-select").addEventListener("change", async (e) => {
     state.instance = e.target.value;
     state.chat = "";
+    state.chats = [];
+    updateUnreadTitle();
     await refreshInstances();
   });
   $("#new-instance").addEventListener("click", () =>
