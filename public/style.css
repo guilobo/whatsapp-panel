@@ -843,6 +843,17 @@ body {
   padding: 4px 8px;
   background: #e8f2ee;
 }
+.edit-composer {
+  border-left-color: #b7791f;
+  background: #fff7e6;
+}
+.edit-composer .reply-composer-copy strong {
+  color: #87590f;
+}
+.composer.edit-active .attach,
+.composer.edit-active .emoji-button {
+  display: none;
+}
 .reply-composer-copy {
   display: grid;
   min-width: 0;
@@ -1420,6 +1431,13 @@ body {
 :root[data-theme="dark"] .reply-composer {
   border-left-color: #54c8ad;
   background: #29413b;
+}
+:root[data-theme="dark"] .edit-composer {
+  border-left-color: #e4b75e;
+  background: #403721;
+}
+:root[data-theme="dark"] .edit-composer .reply-composer-copy strong {
+  color: #f0c76e;
 }
 :root[data-theme="dark"] .reply-composer-copy small {
   color: #c0cec9;

@@ -1749,6 +1749,147 @@ app.post("/api/messages/:id/react", auth, async (q, r, n) => {
     n(e);
   }
 });
+app.post("/api/messages/:id/edit", auth, async (q, r, n) => {
+  const c = await pool.connect();
+  let transaction = false;
+  try {
+    const text = String(q.body.text || "").trim();
+    if (!text || text.length > 12000)
+      return r
+        .status(400)
+        .json({ error: "Message text must be 1–12000 characters." });
+
+    await c.query("begin");
+    transaction = true;
+    const message = (
+      await c.query(
+        "select id,instance_id,chat_jid,message_id,from_me,msg_type,media_id,deleted,content_enc from messages where id=$1 for update",
+        [String(q.params.id)],
+      )
+    ).rows[0];
+    if (
+      !message ||
+      !message.from_me ||
+      message.deleted ||
+      !message.message_id
+    ) {
+      await c.query("rollback");
+      transaction = false;
+      return r
+        .status(404)
+        .json({ error: "This sent message can no longer be edited." });
+    }
+    const current = JSON.parse(open(message.content_enc).toString());
+    if (message.media_id || !String(current.text || "").trim()) {
+      await c.query("rollback");
+      transaction = false;
+      return r
+        .status(400)
+        .json({ error: "Only sent text messages can be edited." });
+    }
+    if (current.text === text) {
+      await c.query("commit");
+      transaction = false;
+      return r.json({ ok: true, unchanged: true });
+    }
+
+    await evoInstance(message.instance_id, "/message/edit", {
+      method: "POST",
+      body: {
+        chat: message.chat_jid,
+        messageId: message.message_id,
+        message: text,
+      },
+    });
+    await c.query(
+      "insert into versions(message_row,content_enc,media_id,deleted) values($1,$2,$3,$4)",
+      [message.id, message.content_enc, message.media_id, message.deleted],
+    );
+    const updated = { ...current, text };
+    if (
+      current.raw &&
+      typeof current.raw === "object" &&
+      !Array.isArray(current.raw)
+    ) {
+      updated.raw = { ...current.raw };
+      if (typeof updated.raw.conversation === "string")
+        updated.raw.conversation = text;
+      else if (
+        updated.raw.extendedTextMessage &&
+        typeof updated.raw.extendedTextMessage === "object"
+      )
+        updated.raw.extendedTextMessage = {
+          ...updated.raw.extendedTextMessage,
+          text,
+        };
+      else updated.raw.conversation = text;
+    }
+    await c.query(
+      "update messages set content_enc=$2,edited=true where id=$1",
+      [message.id, seal(JSON.stringify(updated))],
+    );
+    await c.query("commit");
+    transaction = false;
+    emit("message", {
+      instanceId: message.instance_id,
+      chatJid: message.chat_jid,
+    });
+    r.json({ ok: true });
+  } catch (e) {
+    if (transaction) await c.query("rollback").catch(() => {});
+    n(e);
+  } finally {
+    c.release();
+  }
+});
+app.post("/api/messages/:id/delete", auth, async (q, r, n) => {
+  const c = await pool.connect();
+  let transaction = false;
+  try {
+    await c.query("begin");
+    transaction = true;
+    const message = (
+      await c.query(
+        "select id,instance_id,chat_jid,message_id,from_me,media_id,deleted from messages where id=$1 for update",
+        [String(q.params.id)],
+      )
+    ).rows[0];
+    if (!message || !message.from_me || !message.message_id) {
+      await c.query("rollback");
+      transaction = false;
+      return r
+        .status(404)
+        .json({ error: "This message cannot be deleted for everyone." });
+    }
+    if (message.deleted) {
+      await c.query("commit");
+      transaction = false;
+      return r.json({ ok: true, unchanged: true });
+    }
+
+    await evoInstance(message.instance_id, "/message/delete", {
+      method: "POST",
+      body: { chat: message.chat_jid, messageId: message.message_id },
+    });
+    await c.query(
+      "insert into versions(message_row,content_enc,media_id,deleted) select id,content_enc,media_id,deleted from messages where id=$1 and deleted=false",
+      [message.id],
+    );
+    await c.query("update messages set deleted=true where id=$1", [message.id]);
+    await c.query("commit");
+    transaction = false;
+    emit("message", {
+      instanceId: message.instance_id,
+      chatJid: message.chat_jid,
+    });
+    r.json({ ok: true });
+  } catch (e) {
+    if (transaction) await c.query("rollback").catch(() => {});
+    n(e);
+  } finally {
+    c.release();
+  }
+});
 app.get("/api/media/:id", auth, async (q, r, n) => {
   try {
     const f = await getFile(q.params.id);
@@ -2074,11 +2215,11 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
     } else if (revoke && chat && target) {
       const old = (
         await c.query(
-          "select * from messages where instance_id=$1 and chat_jid=$2 and message_id=$3",
+          "select * from messages where instance_id=$1 and chat_jid=$2 and message_id=$3 for update",
           [q.params.id, chat, target],
         )
       ).rows[0];
-      if (old) {
+      if (old && !old.deleted) {
         await c.query(
           "insert into versions(message_row,content_enc,media_id,deleted) values($1,$2,$3,$4)",
           [old.id, old.content_enc, old.media_id, old.deleted],
@@ -2153,14 +2294,22 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
         type = String(i.MediaType || i.Type || (mediaId ? "media" : "text")),
         ts = new Date(i.Timestamp || Date.now());
       if (old && edit) {
-        await c.query(
-          "insert into versions(message_row,content_enc,media_id,deleted) values($1,$2,$3,$4)",
-          [old.id, old.content_enc, old.media_id, old.deleted],
-        );
-        await c.query(
-          "update messages set content_enc=$2,media_id=coalesce($3,media_id),edited=true where id=$1",
-          [old.id, content, mediaId],
-        );
+        const oldContent = JSON.parse(open(old.content_enc).toString()),
+          newContent = JSON.parse(open(content).toString()),
+          editChanged =
+            (Boolean(newContent.text) || Boolean(mediaId)) &&
+            (oldContent.text !== newContent.text ||
+              (mediaId && old.media_id !== mediaId));
+        if (editChanged) {
+          await c.query(
+            "insert into versions(message_row,content_enc,media_id,deleted) values($1,$2,$3,$4)",
+            [old.id, old.content_enc, old.media_id, old.deleted],
+          );
+          await c.query(
+            "update messages set content_enc=$2,media_id=coalesce($3,media_id),edited=true where id=$1",
+            [old.id, content, mediaId],
+          );
+        }
       } else
         await c.query(
           "insert into messages(instance_id,chat_jid,message_id,sender,sender_name,from_me,msg_type,content_enc,media_id,ts,status,sender_jid,sender_alt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$13,$14) on conflict(instance_id,chat_jid,message_id) do update set content_enc=excluded.content_enc,edited=messages.edited or $12,sender_jid=coalesce(excluded.sender_jid,messages.sender_jid),sender_alt=coalesce(excluded.sender_alt,messages.sender_alt)",

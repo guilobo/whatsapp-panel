@@ -15,6 +15,8 @@ const $ = (s) => document.querySelector(s),
     participantObserver: null,
     drawerRequest: 0,
     replyTo: null,
+    editingMessage: null,
+    editDraft: "",
     emojiMode: "",
     reactionTarget: null,
     emojiData: null,
@@ -324,6 +326,8 @@ async function refreshInstances() {
       sel.append(o);
     });
     if (!rows.length) {
+      clearReply();
+      clearEdit(false);
       state.instance = "";
       state.chat = "";
       state.chats = [];
@@ -430,6 +434,7 @@ async function openChat(c) {
   closeContactInfo();
   closeEmojiPicker();
   clearReply();
+  clearEdit(false);
   state.chat = c.jid;
   $("#contact-name").textContent = c.name;
   const avatar = $("#contact-avatar");
@@ -686,8 +691,30 @@ function closeEmojiPicker() {
 function clearReply() {
   state.replyTo = null;
   const composer = $("#composer");
-  if (composer) composer.classList.remove("reply-active");
+  if (composer && !state.editingMessage)
+    composer.classList.remove("reply-active");
   show("#reply-composer", false);
+}
+function clearEdit(restoreDraft = true) {
+  const wasEditing = Boolean(state.editingMessage),
+    composer = $("#composer"),
+    input = $("#message-input"),
+    sendButton = $("#send-message");
+  state.editingMessage = null;
+  if (wasEditing && input)
+    input.value = restoreDraft ? state.editDraft : "";
+  state.editDraft = "";
+  if (composer) {
+    composer.classList.remove("edit-active");
+    if (!state.replyTo) composer.classList.remove("reply-active");
+  }
+  show("#edit-composer", false);
+  if (sendButton) {
+    sendButton.textContent = "➤";
+    sendButton.setAttribute("aria-label", "Send");
+    sendButton.title = "Send";
+  }
+  if (input) resizeMessageInput();
 }
 function resizeMessageInput() {
   const input = $("#message-input");
@@ -700,6 +727,7 @@ function resizeMessageInput() {
 }
 function startReply(message) {
   if (!message || message.deleted) return;
+  clearEdit(false);
   closeMessageMenus();
   closeEmojiPicker();
   state.replyTo = message;
@@ -710,6 +738,33 @@ function startReply(message) {
   $("#composer").classList.add("reply-active");
   show("#reply-composer", true);
   $("#message-input").focus();
+}
+function startEdit(message) {
+  if (
+    !message?.fromMe ||
+    message.deleted ||
+    message.mediaId ||
+    !String(message.content?.text || "").trim()
+  )
+    return;
+  closeMessageMenus();
+  closeEmojiPicker();
+  clearReply();
+  const input = $("#message-input"),
+    composer = $("#composer"),
+    sendButton = $("#send-message");
+  state.editDraft = input.value;
+  state.editingMessage = message;
+  input.value = message.content.text;
+  $("#edit-composer-text").textContent = messagePreviewText(message);
+  composer.classList.add("reply-active", "edit-active");
+  show("#edit-composer", true);
+  sendButton.textContent = "✓";
+  sendButton.setAttribute("aria-label", "Save edited message");
+  sendButton.title = "Save edited message";
+  resizeMessageInput();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 }
 function showReactionPicker(message, bubble) {
   openEmojiPicker("reaction", message.id, bubble);
@@ -1117,6 +1172,25 @@ function renderMessages() {
       reply.addEventListener("click", () => startReply(m));
       react.addEventListener("click", () => showReactionPicker(m, b));
       menu.append(quick, reply, react);
+      if (m.fromMe) {
+        if (!m.mediaId && String(m.content?.text || "").trim()) {
+          const edit = document.createElement("button");
+          edit.type = "button";
+          edit.setAttribute("role", "menuitem");
+          edit.textContent = "Edit";
+          edit.addEventListener("click", () => startEdit(m));
+          menu.append(edit);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.setAttribute("role", "menuitem");
+        remove.textContent = "Delete for everyone";
+        remove.addEventListener("click", () => {
+          closeMessageMenus();
+          deleteForEveryone(m);
+        });
+        menu.append(remove);
+      }
       b.append(menu);
       b.addEventListener("contextmenu", (event) => {
         event.preventDefault();
@@ -1143,6 +1217,7 @@ function renderMessages() {
 async function sendText(e) {
   e.preventDefault();
   if (state.sendingText) return;
+  if (state.editingMessage) return saveEditedMessage();
   const input = $("#message-input"),
     draft = input.value,
     text = draft.trim(),
@@ -1179,6 +1254,60 @@ async function sendText(e) {
     composer.removeAttribute("aria-busy");
     sendButton.disabled = false;
     sendButton.setAttribute("aria-label", "Send");
+  }
+}
+async function saveEditedMessage() {
+  const message = state.editingMessage,
+    input = $("#message-input"),
+    text = input.value.trim(),
+    composer = $("#composer"),
+    sendButton = $("#send-message"),
+    instanceId = state.instance,
+    chatJid = state.chat;
+  if (!message || !text) {
+    if (!text) toast("Message text cannot be empty.");
+    return;
+  }
+  state.sendingText = true;
+  composer.setAttribute("aria-busy", "true");
+  sendButton.disabled = true;
+  sendButton.setAttribute("aria-label", "Saving edited message");
+  try {
+    await api("/api/messages/" + encodeURIComponent(message.id) + "/edit", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    if (state.editingMessage?.id === message.id) {
+      clearEdit(false);
+      input.value = "";
+      resizeMessageInput();
+    }
+    if (state.instance === instanceId && state.chat === chatJid)
+      await loadMessages();
+    toast("Message edited");
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.sendingText = false;
+    composer.removeAttribute("aria-busy");
+    sendButton.disabled = false;
+  }
+}
+async function deleteForEveryone(message) {
+  if (!message?.fromMe || message.deleted) return;
+  if (
+    !window.confirm("Delete this message for everyone? This cannot be undone.")
+  )
+    return;
+  try {
+    await api("/api/messages/" + encodeURIComponent(message.id) + "/delete", {
+      method: "POST",
+    });
+    if (state.editingMessage?.id === message.id) clearEdit(false);
+    await loadMessages();
+    toast("Message deleted for everyone");
+  } catch (e) {
+    toast(e.message);
   }
 }
 async function sendFile(e) {
@@ -1543,6 +1672,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   conversation.addEventListener("drop", imageFromDrop);
   $("#search").addEventListener("input", renderChats);
   $("#instance-select").addEventListener("change", async (e) => {
+    clearReply();
+    clearEdit(false);
     state.instance = e.target.value;
     state.chat = "";
     state.chats = [];
@@ -1570,6 +1701,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   phoneInput.addEventListener("input", () => maskPhoneInput(phoneInput));
   $("#reply-cancel").addEventListener("click", clearReply);
+  $("#edit-cancel").addEventListener("click", () => clearEdit(true));
   emojiCategories.forEach(([group, icon, label]) => {
     const button = document.createElement("button");
     button.type = "button";
