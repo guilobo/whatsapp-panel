@@ -26,10 +26,38 @@ const $ = (s) => document.querySelector(s),
     titleTimer: 0,
     titleUnreadCount: 0,
     titleShowingMessage: false,
+    titleFaviconCount: 0,
+    titleFaviconDataUrl: "",
   };
 const BASE_PAGE_TITLE = document.title || "WhatsApp Panel";
+const BASE_FAVICON_URL = "/favicon.svg?v=20261118-unread-icon";
 function show(id, on) {
   $(id).classList.toggle("hidden", !on);
+}
+function updateUnreadFavicon() {
+  const icon = $("#app-favicon");
+  if (!icon) return;
+  const count = state.titleUnreadCount;
+  if (!count || state.titleShowingMessage) {
+    if (icon.getAttribute("href") !== BASE_FAVICON_URL)
+      icon.setAttribute("href", BASE_FAVICON_URL);
+    return;
+  }
+  if (state.titleFaviconCount !== count) {
+    const label = count > 9 ? "9+" : String(count),
+      size = label.length > 1 ? 25 : 37,
+      svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="31" fill="#0b806f"/><text x="32" y="44" text-anchor="middle" fill="#fff" font-family="Arial,Helvetica,sans-serif" font-size="' +
+        size +
+        '" font-weight="700">' +
+        label +
+        "</text></svg>";
+    state.titleFaviconCount = count;
+    state.titleFaviconDataUrl =
+      "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  }
+  if (icon.getAttribute("href") !== state.titleFaviconDataUrl)
+    icon.setAttribute("href", state.titleFaviconDataUrl);
 }
 function setUnreadTitle(count) {
   count = Math.max(0, Math.floor(Number(count) || 0));
@@ -39,6 +67,7 @@ function setUnreadTitle(count) {
     state.titleUnreadCount = 0;
     state.titleShowingMessage = false;
     document.title = BASE_PAGE_TITLE;
+    updateUnreadFavicon();
     return;
   }
   if (count === state.titleUnreadCount && state.titleTimer) return;
@@ -46,11 +75,13 @@ function setUnreadTitle(count) {
   state.titleUnreadCount = count;
   state.titleShowingMessage = false;
   document.title = `(${count}) ${BASE_PAGE_TITLE}`;
+  updateUnreadFavicon();
   state.titleTimer = window.setInterval(() => {
     state.titleShowingMessage = !state.titleShowingMessage;
     document.title = state.titleShowingMessage
       ? "New message"
       : `(${state.titleUnreadCount}) ${BASE_PAGE_TITLE}`;
+    updateUnreadFavicon();
   }, 1500);
 }
 function updateUnreadTitle() {
