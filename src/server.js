@@ -176,11 +176,7 @@ async function auth(q, r, n) {
         [hash(token)],
       ),
       u = x.rows[0];
-    if (
-      !u ||
-      new Date(u.expires_at) < new Date() ||
-      new Date(u.last_seen) < new Date(Date.now() - 1800000)
-    ) {
+    if (!u || new Date(u.expires_at) < new Date()) {
       if (u)
         await pool.query("delete from sessions where token_hash=$1", [
           u.token_hash,
@@ -1248,8 +1244,119 @@ app.get("/api/participants/:jid/info", auth, async (q, r, n) => {
     n(e);
   }
 });
+const MEDIA_MIME_BY_EXTENSION = {
+  ".avif": "image/avif",
+  ".csv": "text/csv",
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".m4a": "audio/mp4",
+  ".mkv": "video/x-matroska",
+  ".mov": "video/quicktime",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".oga": "audio/ogg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
+  ".wav": "audio/wav",
+};
+const MEDIA_EXTENSION_BY_MIME = {
+  "audio/mp4": ".m4a",
+  "audio/mpeg": ".mp3",
+  "audio/ogg": ".ogg",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "image/avif": ".avif",
+  "image/gif": ".gif",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+  "video/x-matroska": ".mkv",
+  "application/pdf": ".pdf",
+  "application/zip": ".zip",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.ms-excel": ".xls",
+  "application/vnd.ms-powerpoint": ".ppt",
+  "application/msword": ".doc",
+  "text/csv": ".csv",
+  "text/plain": ".txt",
+};
+function mediaNameWithExtension(name, mime) {
+  const normalizedName =
+    path
+      .basename(String(name || "media"))
+      .replace(/[\x00-\x1f\x7f]/g, "")
+      .trim() || "media";
+  const extension = MEDIA_EXTENSION_BY_MIME[String(mime || "").toLowerCase()];
+  const currentExtension = path.extname(normalizedName).toLowerCase();
+  if (currentExtension && !(currentExtension === ".bin" && extension))
+    return normalizedName;
+  if (currentExtension === ".bin" && extension)
+    return normalizedName.slice(0, -currentExtension.length) + extension;
+  return extension ? normalizedName + extension : normalizedName;
+}
+function mediaMetadata(buf, mime, name, type, gifPlayback = false) {
+  const originalName =
+      path
+        .basename(String(name || "media"))
+        .replace(/[\x00-\x1f\x7f]/g, "")
+        .trim() || "media",
+    extension = path.extname(originalName).toLowerCase();
+  let normalizedMime = String(mime || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (!normalizedMime || normalizedMime === "application/octet-stream")
+    normalizedMime = MEDIA_MIME_BY_EXTENSION[extension] || normalizedMime;
+  if (buf?.length) {
+    if (/^GIF8[79]a$/.test(buf.subarray(0, 6).toString("ascii")))
+      normalizedMime = "image/gif";
+    else if (
+      buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    )
+      normalizedMime = "image/png";
+    else if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff)
+      normalizedMime = "image/jpeg";
+    else if (
+      buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buf.subarray(8, 12).toString("ascii") === "WEBP"
+    )
+      normalizedMime = "image/webp";
+    else if (buf.subarray(4, 8).toString("ascii") === "ftyp")
+      normalizedMime = "video/mp4";
+    else if (buf.subarray(0, 4).toString("ascii") === "OggS")
+      normalizedMime = "audio/ogg";
+    else if (buf.subarray(0, 4).toString("ascii") === "%PDF")
+      normalizedMime = "application/pdf";
+  }
+  const kind = String(type || "").toLowerCase();
+  if (!normalizedMime || normalizedMime === "application/octet-stream") {
+    if (gifPlayback || kind.includes("gif") || kind.includes("video"))
+      normalizedMime = "video/mp4";
+    else if (kind.includes("audio") || kind === "ptt")
+      normalizedMime = "audio/ogg";
+    else if (kind.includes("image")) normalizedMime = "image/jpeg";
+  }
+  return {
+    mime: normalizedMime || "application/octet-stream",
+    original: mediaNameWithExtension(originalName, normalizedMime),
+  };
+}
 async function saveFile(buf, mime, name) {
   const id = crypto.randomUUID(),
+    metadata = mediaMetadata(buf, mime, name),
     fn = id + ".bin",
     iv = crypto.randomBytes(12),
     c = crypto.createCipheriv("aes-256-gcm", C.enc, iv),
@@ -1258,7 +1365,7 @@ async function saveFile(buf, mime, name) {
   await fsp.writeFile(path.join(C.media, fn), enc, { mode: 0o600, flag: "wx" });
   await pool.query(
     "insert into media(id,file_name,mime,original,size) values($1,$2,$3,$4,$5)",
-    [id, fn, mime, path.basename(name).slice(0, 200), buf.length],
+    [id, fn, metadata.mime, metadata.original.slice(0, 200), buf.length],
   );
   return id;
 }
@@ -1273,12 +1380,22 @@ async function removeMedia(id) {
       .catch(() => {});
 }
 async function getFile(id) {
-  const m = (await pool.query("select * from media where id=$1", [id])).rows[0];
+  const m = (
+    await pool.query(
+      "select media.*,coalesce((select msg_type from messages where media_id=media.id order by ts desc limit 1),'') media_type from media where id=$1",
+      [id],
+    )
+  ).rows[0];
   if (!m) return null;
   const b = await fsp.readFile(path.join(C.media, m.file_name)),
     d = crypto.createDecipheriv("aes-256-gcm", C.enc, b.subarray(0, 12));
   d.setAuthTag(b.subarray(12, 28));
-  return { m, b: Buffer.concat([d.update(b.subarray(28)), d.final()]) };
+  const plain = Buffer.concat([d.update(b.subarray(28)), d.final()]),
+    metadata = mediaMetadata(plain, m.mime, m.original, m.media_type);
+  return {
+    m: { ...m, mime: metadata.mime, original: metadata.original },
+    b: plain,
+  };
 }
 class TelegramDeliveryError extends Error {
   constructor(status, retryAfter = 0) {
@@ -2258,7 +2375,7 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
             "base64",
           );
         if (buf.length && buf.length < 24 * 1024 * 1024) {
-          const mime = String(
+          const declaredMime = String(
               d.mimetype ||
                 d.mimeType ||
                 m.imageMessage?.mimetype ||
@@ -2269,6 +2386,38 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
                   ? raw.slice(5, raw.indexOf(";"))
                   : "application/octet-stream"),
             ).split(";")[0],
+            mediaType = String(
+              i.MediaType ||
+                i.Type ||
+                (m.videoMessage
+                  ? "video"
+                  : m.audioMessage
+                    ? "audio"
+                    : m.imageMessage
+                      ? "image"
+                      : m.documentMessage
+                        ? "document"
+                        : ""),
+            ),
+            originalName =
+              d.fileName ||
+              d.filename ||
+              m.documentMessage?.fileName ||
+              m.imageMessage?.fileName ||
+              m.videoMessage?.fileName ||
+              m.audioMessage?.fileName ||
+              "media",
+            metadata = mediaMetadata(
+              buf,
+              declaredMime,
+              originalName,
+              mediaType,
+              [
+                m.videoMessage?.gifPlayback,
+                m.videoMessage?.GIFPlayback,
+                m.videoMessage?.gif_playback,
+              ].some((value) => value === true || value === 1 || value === "true"),
+            ),
             id = crypto.randomUUID(),
             fn = id + ".bin",
             iv = crypto.randomBytes(12),
@@ -2282,13 +2431,8 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
             [
               id,
               fn,
-              mime,
-              String(
-                d.fileName ||
-                  d.filename ||
-                  m.documentMessage?.fileName ||
-                  "media",
-              ).slice(0, 200),
+              metadata.mime,
+              metadata.original.slice(0, 200),
               buf.length,
             ],
           );
@@ -2303,7 +2447,21 @@ app.post("/api/webhook/:id/:token", async (q, r, n) => {
             [q.params.id, chat, mid],
           )
         ).rows[0],
-        type = String(i.MediaType || i.Type || (mediaId ? "media" : "text")),
+        type = String(
+          i.MediaType ||
+            i.Type ||
+            (m.videoMessage
+              ? "VideoMessage"
+              : m.audioMessage
+                ? "AudioMessage"
+                : m.imageMessage
+                  ? "ImageMessage"
+                  : m.documentMessage
+                    ? "DocumentMessage"
+                    : mediaId
+                      ? "media"
+                      : "text"),
+        ),
         ts = new Date(i.Timestamp || Date.now());
       if (old && edit) {
         const oldContent = JSON.parse(open(old.content_enc).toString()),

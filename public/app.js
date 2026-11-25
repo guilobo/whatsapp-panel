@@ -1046,6 +1046,17 @@ function renderMessages() {
     } else {
       if (m.mediaId) {
         const url = "/api/media/" + encodeURIComponent(m.mediaId);
+        const rawVideo = m.content?.raw?.videoMessage || {},
+          isGifPlayback = [
+            rawVideo.gifPlayback,
+            rawVideo.GIFPlayback,
+            rawVideo.gif_playback,
+          ].some(
+            (value) =>
+              value === true ||
+              value === 1 ||
+              String(value || "").toLowerCase() === "true",
+          );
         if (
           String(m.mime || "")
             .toLowerCase()
@@ -1082,9 +1093,18 @@ function renderMessages() {
           );
           preview.append(im);
           b.append(preview);
-        } else if (String(m.type).toLowerCase().includes("video")) {
+        } else if (
+          String(m.type).toLowerCase().includes("video") ||
+          String(m.mime || "").toLowerCase().startsWith("video/") ||
+          isGifPlayback
+        ) {
           const v = document.createElement("video");
-          v.controls = true;
+          v.controls = !isGifPlayback;
+          v.autoplay = isGifPlayback;
+          v.loop = isGifPlayback;
+          v.muted = isGifPlayback;
+          v.playsInline = true;
+          v.preload = isGifPlayback ? "auto" : "metadata";
           v.src = url;
           b.append(v);
         } else {
